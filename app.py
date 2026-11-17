@@ -66,11 +66,9 @@ def load_model():
 @st.cache_data
 def load_data():
     try:
-        # Tenta carregar os dados reais gerados no Passo 1
         df = pd.read_csv('data/processed/dataset_dengueradar_limpo.csv')
         return df, True
     except:
-        # Fallback de demonstração caso o arquivo falte (FIAP)
         anos = [2023, 2024]
         semanas = list(range(1, 53))
         dados = []
@@ -108,21 +106,20 @@ def gerar_recomendacoes(risco):
     }
     return recom.get(risco, [])
 
-
 def simular_distribuicao_espacial(casos_totais):
-    # Gera distribuição de focos fictícia para o MVP (claramente rotulada)
+    # Populações municipais reais (IBGE/SEADE) para cálculo correto e proporcional da incidência
     municipios = [
-        {"mun": "São Paulo", "lat": -23.5505, "lon": -46.6333, "peso": 0.45},
-        {"mun": "Guarulhos", "lat": -23.4628, "lon": -46.5333, "peso": 0.15},
-        {"mun": "Campinas", "lat": -22.9099, "lon": -47.0626, "peso": 0.12},
-        {"mun": "Osasco", "lat": -23.5329, "lon": -46.7917, "peso": 0.10},
-        {"mun": "Santo André", "lat": -23.6638, "lon": -46.5383, "peso": 0.10},
-        {"mun": "SBC", "lat": -23.6939, "lon": -46.5644, "peso": 0.08}
+        {"mun": "São Paulo", "lat": -23.5505, "lon": -46.6333, "peso": 0.45, "pop": 11451999},
+        {"mun": "Guarulhos", "lat": -23.4628, "lon": -46.5333, "peso": 0.15, "pop": 1291771},
+        {"mun": "Campinas", "lat": -22.9099, "lon": -47.0626, "peso": 0.12, "pop": 1138309},
+        {"mun": "Osasco", "lat": -23.5329, "lon": -46.7917, "peso": 0.10, "pop": 699944},
+        {"mun": "Santo André", "lat": -23.6638, "lon": -46.5383, "peso": 0.10, "pop": 748919},
+        {"mun": "São Bernardo do Campo", "lat": -23.6939, "lon": -46.5644, "peso": 0.08, "pop": 810729}
     ]
     dados = []
     for m in municipios:
         casos_estimados = int(casos_totais * m["peso"])
-        incidencia_est = (casos_estimados / (m["peso"] * 12000000)) * 100000 # pop ficticia baseada no peso
+        incidencia_est = (casos_estimados / m["pop"]) * 100000
         dados.append({
             "Município/Região": m["mun"],
             "Casos Previstos": casos_estimados,
@@ -133,12 +130,10 @@ def simular_distribuicao_espacial(casos_totais):
     return pd.DataFrame(dados).sort_values("Casos Previstos", ascending=False)
 
 def gerar_pontos_individuais(df_resumo):
-    # Para cada município, gera N pontos baseados no número de Casos Previstos
     pontos = []
     for _, row in df_resumo.iterrows():
         n_casos = int(row['Casos Previstos'])
         if n_casos > 0:
-            # Distribui aleatoriamente num raio aproximado do centro do município (scale=0.035 é ~3 a 4km)
             lats = np.random.normal(loc=row['Lat'], scale=0.035, size=n_casos)
             lons = np.random.normal(loc=row['Lon'], scale=0.035, size=n_casos)
             for lat, lon in zip(lats, lons):
@@ -148,7 +143,6 @@ def gerar_pontos_individuais(df_resumo):
                     'lon': lon
                 })
     return pd.DataFrame(pontos)
-
 
 
 # ==========================================
@@ -185,12 +179,10 @@ if menu == "1. Visão Geral Epidemiológica":
         st.error("Modelo de IA não treinado. Acesse o Notebook 02 e gere os arquivos `.pkl` na pasta `models/`.")
         st.stop()
         
-    # Painel de Seleção Rápida
     col_a, col_b, col_c = st.columns(3)
     semana_atual = df_historico['semana_epidem'].max() if not df_historico.empty else 15
     with col_a: semana_sel = st.slider("Selecione a Semana Epidemiológica", 1, 52, int(semana_atual))
     
-    # Busca dados históricos da semana para preencher os inputs de previsão
     hist_semana = df_historico[df_historico['semana_epidem'] == semana_sel]
     temp_ref = hist_semana['temp_media'].mean() if not hist_semana.empty else 25.0
     chuva_ref = hist_semana['precipitacao_total'].mean() if not hist_semana.empty else 50.0
@@ -198,15 +190,13 @@ if menu == "1. Visão Geral Epidemiológica":
     input_data = {'semana_epidem': semana_sel, 'temp_media': temp_ref, 'precipitacao_total': chuva_ref}
     input_df = pd.DataFrame([input_data])[features_cols]
     
-    # Previsão
     previsao = modelo_rf.predict(input_df)[0]
     casos_ultimo_periodo = hist_semana['casos'].mean() if not hist_semana.empty else 0
     variacao = ((previsao - casos_ultimo_periodo) / casos_ultimo_periodo) * 100 if casos_ultimo_periodo > 0 else 0
     
-    incidencia = (previsao / 12000000) * 100000 # Assumindo pop de 12M para SP
+    incidencia = (previsao / 12000000) * 100000
     risco_label, risco_class, risco_cor = calcular_risco(previsao, incidencia)
     
-    # --- LINHA 1: INDICADORES PRINCIPAIS ---
     st.markdown("### Indicadores de Monitoramento")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Casos Previstos", f"{int(previsao)}", f"{variacao:+.1f}% vs obs.", delta_color="inverse")
@@ -219,26 +209,22 @@ if menu == "1. Visão Geral Epidemiológica":
     
     st.markdown("---")
     
-    # --- LINHA 2: GRÁFICOS (Real vs Previsto + Termômetro) ---
     c_graf1, c_graf2 = st.columns([2, 1])
     
     with c_graf1:
         st.markdown("#### Casos Reais vs. Previstos (Tendência)")
-        # Preparar dados para o gráfico
         df_plot = df_historico.groupby('semana_epidem')['casos'].mean().reset_index()
-        # Prever para todo o ano para gerar a curva preditiva
         df_plot['casos_previstos'] = modelo_rf.predict(df_historico.groupby('semana_epidem')[features_cols].mean())
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_plot['semana_epidem'], y=df_plot['casos'], mode='lines', name='Casos Reais (Observados)', line=dict(color='#38BDF8', width=3)))
         fig.add_trace(go.Scatter(x=df_plot['semana_epidem'], y=df_plot['casos_previstos'], mode='lines', name='Projeção do Modelo', line=dict(color='#F43F5E', width=3, dash='dash')))
         
-        # Sombra de incerteza (simulada via std)
         std_dev = df_plot['casos_previstos'] * 0.15
         fig.add_trace(go.Scatter(x=pd.concat([df_plot['semana_epidem'], df_plot['semana_epidem'][::-1]]),
                                  y=pd.concat([df_plot['casos_previstos'] + std_dev, (df_plot['casos_previstos'] - std_dev)[::-1]]),
-                                 fill='toself', fillcolor='rgba(244, 63, 94, 0.1)', line=dict(color='rgba(255,255,255,0)'),
-                                 hoverinfo="skip", showlegend=True, name='Intervalo de Confiança'))
+                                 fill='toself', fillcolor='rgba(244, 63, 94, 0.08)', line=dict(color='rgba(255,255,255,0)'),
+                                 hoverinfo="skip", showlegend=True, name='Faixa de Incerteza (Ilustrativa)'))
         
         fig.add_vline(x=semana_sel, line_width=2, line_dash="dot", line_color="white", annotation_text="Semana Selecionada")
         fig.update_layout(height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
@@ -248,9 +234,7 @@ if menu == "1. Visão Geral Epidemiológica":
         
     with c_graf2:
         st.markdown("#### Escala de Risco Epidemiológico")
-        # Escala dinâmica inteligente para o Termômetro (Item 3)
         limite_max = max(1500, previsao * 1.25)
-        # Calcula os stops de cores baseados em limiares proporcionais ou fixos se fizer sentido
         
         fig_gauge = go.Figure(go.Indicator(
             mode = "gauge+number", value = previsao,
@@ -266,18 +250,15 @@ if menu == "1. Visão Geral Epidemiológica":
         fig_gauge.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#F8FAFC'), margin=dict(l=20, r=20, t=20, b=20))
         st.plotly_chart(fig_gauge, use_container_width=True)
         
-    # --- LINHA 3: PLANO DE AÇÃO ---
     st.markdown("### 📋 Plano de Ação Recomendado")
     rec_list = gerar_recomendacoes(risco_label)
     for r in rec_list:
         st.write(r)
     st.caption("*Nota: O DengueRadar é um sistema de apoio à decisão. Medidas operacionais devem ser validadas com a Vigilância Sanitária local.*")
 
-    # --- LINHA 4: EXPORTAÇÃO ---
     st.markdown("---")
     st.subheader("📥 Exportação de Dados")
     
-    # Criar DataFrame com os dados consolidados da semana
     df_export = pd.DataFrame({
         "Semana Epidemiológica": [semana_sel],
         "Casos Previstos": [int(previsao)],
@@ -297,56 +278,49 @@ if menu == "1. Visão Geral Epidemiológica":
     )
 
 
-
+# ==========================================
 # 6. PÁGINA 2: INTELIGÊNCIA TERRITORIAL
 # ==========================================
 elif menu == "2. Inteligência Territorial (Radar)":
     st.title("Radar Geográfico Epidemiológico")
-    st.markdown('<p class="subtitle">Análise espacial de risco e priorização territorial com distribuição por casos.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Análise espacial de risco e priorização territorial com distribuição heurística por casos.</p>', unsafe_allow_html=True)
     
-    # Gerar a distribuição de base
     casos_base = st.sidebar.number_input("Casos Globais (Simulador Mapa)", value=1500, step=100)
     df_espacial = simular_distribuicao_espacial(casos_base)
     
     col1, col2 = st.columns([1, 3])
     with col1:
         st.write("Filtros de Região")
-        # Filtro real de cidades
         opcoes_cidades = ["Todos os Municípios"] + list(df_espacial['Município/Região'].unique())
         cidade_sel = st.selectbox("Filtrar Município Específico", opcoes_cidades)
         
     with col2:
-        st.info(f"💡 **Inteligência Territorial:** Cada pontinho no mapa representa **1 caso previsto**. Foram gerados dinamicamente em torno dos municípios para ilustrar a dispersão.")
+        st.info(f"💡 **Inteligência Territorial:** Cada pontinho no mapa representa visualmente **1 caso estimado** distribuído heuristicamente em torno do centroide populacional do município.")
     
     st.markdown("---")
     c_mapa, c_rank = st.columns([2, 1.2])
     
-    # Filtragem de dados
     if cidade_sel != "Todos os Municípios":
         df_espacial_filtrado = df_espacial[df_espacial['Município/Região'] == cidade_sel]
     else:
         df_espacial_filtrado = df_espacial
         
-    # Gera 1 ponto de coordenada para cada 1 caso
     df_pontinhos = gerar_pontos_individuais(df_espacial_filtrado)
     
     with c_mapa:
-        st.markdown(f"#### Focos Previstos: {cidade_sel}")
+        st.markdown(f"#### Distribuição Espacial Simulada: {cidade_sel}")
         if not df_pontinhos.empty:
-            # Mapa nativo plotando cada linha como um ponto independente
             st.map(df_pontinhos, latitude="lat", longitude="lon", color="#EF4444")
         else:
             st.warning("Nenhum caso projetado para esta seleção.")
             
-        st.caption(f"Visualizando {len(df_pontinhos)} focos. Aviso: Coordenadas dispersadas estatisticamente num raio aproximado de 4km do centro (não são endereços reais).")
+        st.caption(f"Visualizando {len(df_pontinhos)} pontos de distribuição estimada. Aviso: Coordenadas dispersadas estatisticamente num raio aproximado de 4km do centro (heurística de visualização).")
         
     with c_rank:
         st.markdown("#### 🚨 Ranking de Intervenção")
-        # Criando o ranking estético
         df_rank = df_espacial.copy()
         df_rank['Nível de Risco'] = df_rank['Casos Previstos'].apply(lambda x: "CRÍTICO" if x > 400 else "ALTO" if x > 150 else "MODERADO")
         
-        # Destacar a cidade selecionada (se houver) no dataframe
         if cidade_sel != "Todos os Municípios":
             st.dataframe(df_rank[df_rank['Município/Região'] == cidade_sel][['Município/Região', 'Casos Previstos', 'Incidência (100k)', 'Nível de Risco']], 
                          use_container_width=True, hide_index=True)
@@ -360,12 +334,13 @@ elif menu == "2. Inteligência Territorial (Radar)":
         csv = df_rank.to_csv(index=False).encode('utf-8')
         st.download_button(label="📥 Exportar Ranking (CSV)", data=csv, file_name='ranking_regioes.csv', mime='text/csv')
 
+
 # ==========================================
 # 7. PÁGINA 3: SIMULADOR E CENÁRIOS
 # ==========================================
 elif menu == "3. Simulador e Cenários":
     st.title("Simulador Climático e Comparação de Cenários")
-    st.markdown('<p class="subtitle">Avalie o impacto de mudanças na temperatura e precipitação nas projeções.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Avalie o impacto hipotético de mudanças na temperatura e precipitação nas projeções.</p>', unsafe_allow_html=True)
     
     st.write("Defina um cenário de referência e ajuste os parâmetros no cenário simulado para verificar o delta projetado.")
     
@@ -401,7 +376,6 @@ elif menu == "3. Simulador e Cenários":
     st.markdown("---")
     st.markdown("#### Impacto da Simulação")
     
-    # Gráfico de barras comparativo
     fig_comp = go.Figure(data=[
         go.Bar(name='Cenário A', x=['Casos Estimados'], y=[prev_a], marker_color='#38BDF8'),
         go.Bar(name='Cenário B', x=['Casos Estimados'], y=[prev_b], marker_color='#F43F5E')
@@ -410,6 +384,7 @@ elif menu == "3. Simulador e Cenários":
     st.plotly_chart(fig_comp, use_container_width=True)
     
     st.info("⚠️ Mudanças climáticas extremas fora da distribuição dos dados de treinamento podem gerar previsões menos confiáveis (extrapolação matemática).")
+
 
 # ==========================================
 # 8. PÁGINA 4: DIAGNÓSTICO DO MODELO
@@ -422,7 +397,6 @@ elif menu == "4. Diagnóstico do Modelo":
         st.warning("Modelo não carregado.")
         st.stop()
         
-    # Calcular métricas reais com o dataset carregado
     X = df_historico[features_cols]
     y_true = df_historico['casos']
     y_pred = modelo_rf.predict(X)
@@ -433,8 +407,8 @@ elif menu == "4. Diagnóstico do Modelo":
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Modelo Base", "RandomForest", "Scikit-Learn")
     col2.metric("Registros Avaliados", len(df_historico))
-    col3.metric("MAE (Erro Médio Absoluto)", f"{mae:.1f} casos")
-    col4.metric("RMSE (Raiz do Erro Quad.)", f"{rmse:.1f}")
+    col3.metric("MAE (In-Sample)", f"{mae:.1f} casos")
+    col4.metric("RMSE (In-Sample)", f"{rmse:.1f}")
     
     st.markdown("---")
     c1, c2 = st.columns(2)
@@ -460,6 +434,7 @@ elif menu == "4. Diagnóstico do Modelo":
         st.plotly_chart(fig_res, use_container_width=True)
         st.caption("Verificação de viés: Idealmente, os pontos devem estar distribuídos aleatoriamente em torno da linha zero.")
 
+
 # ==========================================
 # 9. PÁGINA 5: DADOS E METODOLOGIA
 # ==========================================
@@ -478,12 +453,12 @@ elif menu == "5. Dados e Metodologia":
     ### 🧠 Modelagem e Inteligência Artificial
     O motor preditivo atual baseia-se num algoritmo **Random Forest Regressor** (Scikit-Learn).
     * **Justificativa:** O modelo consegue mapear interações não-lineares, essenciais para compreender como limiares combinados de chuva e calor desencadeiam ciclos de proliferação do mosquito.
-    * **Validação:** A métrica primária de avaliação é o **Erro Absoluto Médio (MAE)** e a **Raiz do Erro Quadrático Médio (RMSE)**, utilizando validação temporal (train/test split cronológico).
+    * **Validação:** As métricas de avaliação avaliam o ajuste atual, servindo como base para futuras implementações de validação temporal estrita (*walk-forward*).
 
     ### ⚠️ Confiabilidade e Limitações
     A transparência é um pilar do DengueRadar. É fundamental compreender as ressalvas da plataforma:
     1. **Atraso de Notificação:** Os dados observados sofrem atrasos institucionais. O modelo trata dados históricos como consolidados, o que pode não refletir a realidade em tempo real.
-    2. **Distribuição Espacial Heurística:** A aba "Inteligência Territorial" distribui as previsões globais utilizando ponderação populacional. Os focos representam áreas de **vulnerabilidade teórica**, e não localizações precisas de pacientes.
+    2. **Distribuição Espacial Heurística:** A aba "Inteligência Territorial" distribui as previsões globais utilizando ponderação populacional com base em dados reais do IBGE/SEADE. Os pontos representam áreas de **vulnerabilidade teórica estimada**, e não localizações exatas de pacientes.
     3. **Extrapolação Climática:** Simulações com parâmetros climáticos muito além do histórico de treinamento podem gerar previsões estatisticamente não confiáveis.
     4. **Sistema de Apoio:** A IA não toma decisões clínicas. As projeções apoiam o planejamento, mas as ações devem seguir os protocolos oficiais da Vigilância em Saúde.
 """)
