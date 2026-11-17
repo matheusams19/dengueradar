@@ -7,6 +7,8 @@ import plotly.express as px
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import time
 import os
+import json
+from pathlib import Path
 
 # ==========================================
 # 1. CONFIGURAÇÃO DA PÁGINA E CSS
@@ -54,35 +56,54 @@ st.markdown("""
 # ==========================================
 # 2. CARREGAMENTO DE DADOS E MODELO (CACHE)
 # ==========================================
+# Os artefatos são carregados a partir da pasta do projeto, independentemente do diretório de execução.
+BASE = Path(__file__).resolve().parent
+
 @st.cache_resource
 def load_model():
     try:
-        modelo = joblib.load('models/modelo_rf_dengue.pkl')
-        features = joblib.load('models/features_dengue.pkl')
-        return modelo, features
-    except Exception as e:
-        return None, None
+        modelo = joblib.load(BASE / 'models/modelo_rf_dengue.pkl')
+        features = joblib.load(BASE / 'models/features_dengue.pkl')
+        return modelo, features, None
+    except (FileNotFoundError, OSError, ValueError, ImportError) as e:
+        return None, None, str(e)
 
 @st.cache_data
 def load_data():
-    try:
-        df = pd.read_csv('data/processed/dataset_dengueradar_limpo.csv')
-        return df, True
-    except:
-        anos = [2023, 2024]
-        semanas = list(range(1, 53))
-        dados = []
-        for ano in anos:
-            for sem in semanas:
-                temp = 20 + 10 * np.sin(sem * np.pi / 26) + np.random.normal(0, 2)
-                chuva = max(0, 100 + 80 * np.sin(sem * np.pi / 26) + np.random.normal(0, 30))
-                casos = max(0, int((temp * 2.5) + (chuva * 0.8) + np.random.normal(0, 50)))
-                dados.append({'ano': ano, 'semana_epidem': sem, 'temp_media': temp, 'precipitacao_total': chuva, 'casos': casos})
-        return pd.DataFrame(dados), False
+    caminho = BASE / 'data/processed/dataset_dengueradar_limpo.csv'
+    if not caminho.exists():
+        raise FileNotFoundError(f'Dados reais indisponíveis: {caminho}. Execute o notebook 01 antes de publicar.')
+    df = pd.read_csv(caminho)
+    necessarias = {'ano', 'semana_epidem', 'casos', 'temp_media', 'precipitacao_total'}
+    if not necessarias.issubset(df.columns):
+        raise ValueError(f'Colunas ausentes no CSV: {sorted(necessarias - set(df.columns))}')
+    if df[list(necessarias)].isna().any().any() or df.duplicated(['ano','semana_epidem']).any():
+        raise ValueError('CSV contém ausências ou semanas duplicadas. Reexecute a limpeza e validação.')
+    return df.sort_values(['ano','semana_epidem']).reset_index(drop=True)
 
-modelo_rf, features_cols = load_model()
-df_historico, dados_reais = load_data()
+@st.cache_data
+def load_evaluation():
+    pasta = BASE / 'models'
+    meta_path, pred_path = pasta / 'avaliacao_modelo.json', pasta / 'avaliacao_temporal.csv'
+    meta = json.loads(meta_path.read_text(encoding='utf-8')) if meta_path.exists() else None
+    pred = pd.read_csv(pred_path) if pred_path.exists() else None
+    return meta, pred
 
+modelo_rf, features_cols, erro_modelo = load_model()
+try:
+    df_historico = load_data()
+except (FileNotFoundError, ValueError, pd.errors.ParserError) as erro:
+    st.error(f'Não foi possível abrir o histórico real: {erro}')
+    st.info('Por segurança, o DengueRadar não substitui a base epidemiológica por registros simulados.')
+    st.stop()
+
+if modelo_rf is None:
+    st.error(f'Modelo indisponível: {erro_modelo}. Execute o notebook 02 e envie os artefatos à pasta models/.')
+    st.stop()
+if not features_cols or any(col not in df_historico.columns for col in features_cols):
+    st.error('Features do modelo incompatíveis com a base de dados.')
+    st.stop()
+meta_avaliacao, df_avaliacao = load_evaluation()
 
 # ==========================================
 # 3. FUNÇÕES AUXILIARES DE NEGÓCIO
@@ -101,7 +122,7 @@ def gerar_recomendacoes(risco):
     recom = {
         "BAIXO": ["• Manutenção da vigilância e monitoramento de indicadores.", "• Campanhas educativas e preventivas contínuas."],
         "MODERADO": ["• Intensificação de ações preventivas (ex: vistoria de focos).", "• Revisão da disponibilidade de recursos nas UBS."],
-        "ALTO": ["• Priorização da vigilância em áreas críticas com fumacê espacial.", "• Avaliação imediata da capacidade de leitos."],
+        "ALTO": ["• Priorização de inspeções e ações de controle conforme protocolos locais.", "• Avaliação imediata da capacidade de leitos."],
         "CRÍTICO": ["• Comunicação imediata do risco aos gestores e Defesa Civil.", "• Ativação de plano de contingência e abertura de leitos de hidratação."]
     }
     return recom.get(risco, [])
@@ -130,12 +151,14 @@ def simular_distribuicao_espacial(casos_totais):
     return pd.DataFrame(dados).sort_values("Casos Previstos", ascending=False)
 
 def gerar_pontos_individuais(df_resumo):
+    # Amostra determinística, limitada para evitar sobrecarregar o navegador. NÃO representa casos geolocalizados.
+    rng = np.random.default_rng(42)
     pontos = []
     for _, row in df_resumo.iterrows():
-        n_casos = int(row['Casos Previstos'])
+        n_casos = min(1500, int(row['Casos Previstos']))
         if n_casos > 0:
-            lats = np.random.normal(loc=row['Lat'], scale=0.035, size=n_casos)
-            lons = np.random.normal(loc=row['Lon'], scale=0.035, size=n_casos)
+            lats = rng.normal(loc=row['Lat'], scale=0.035, size=n_casos)
+            lons = rng.normal(loc=row['Lon'], scale=0.035, size=n_casos)
             for lat, lon in zip(lats, lons):
                 pontos.append({
                     'Município': row['Município/Região'],
@@ -149,7 +172,10 @@ def gerar_pontos_individuais(df_resumo):
 # 4. BARRA LATERAL (MENU E CONTROLES)
 # ==========================================
 with st.sidebar:
-    st.image("LogoDengueRadar.png", use_container_width=True)
+    if (BASE / 'LogoDengueRadar.png').exists():
+        st.image(str(BASE / 'LogoDengueRadar.png'), use_container_width=True)
+    else:
+        st.markdown('### 🦟 DengueRadar')
     st.markdown("---")
     
     menu = st.radio("Navegação Principal", [
@@ -161,11 +187,10 @@ with st.sidebar:
     ])
     
     st.markdown("---")
-    if not dados_reais:
-        st.warning("⚠️ **Aviso:** Utilizando dados de fallback (simulados) pois o CSV original não foi encontrado.")
+    st.caption("Base real carregada. Consulte a cobertura temporal e as limitações na página de metodologia.")
         
     st.caption("Desenvolvido para FIAP | CitizenTech")
-    st.caption("✨ Versão 2.0 (Deep Navy) - Atualizada")
+    st.caption("Versão revisada — indicadores demonstrativos devidamente identificados")
 
 
 # ==========================================
@@ -180,10 +205,11 @@ if menu == "1. Visão Geral Epidemiológica":
         st.stop()
         
     col_a, col_b, col_c = st.columns(3)
-    semana_atual = df_historico['semana_epidem'].max() if not df_historico.empty else 15
-    with col_a: semana_sel = st.slider("Selecione a Semana Epidemiológica", 1, 52, int(semana_atual))
+    semana_atual = int(df_historico.iloc[-1]['semana_epidem'])
+    with col_a: semana_sel = st.slider("Semana epidemiológica de referência (histórica)", 1, 53, int(semana_atual))
     
     hist_semana = df_historico[df_historico['semana_epidem'] == semana_sel]
+    st.caption('Comparação retrospectiva por semana do ano, agregando anos distintos; não é previsão operacional da próxima semana.')
     temp_ref = hist_semana['temp_media'].mean() if not hist_semana.empty else 25.0
     chuva_ref = hist_semana['precipitacao_total'].mean() if not hist_semana.empty else 50.0
     
@@ -194,38 +220,37 @@ if menu == "1. Visão Geral Epidemiológica":
     casos_ultimo_periodo = hist_semana['casos'].mean() if not hist_semana.empty else 0
     variacao = ((previsao - casos_ultimo_periodo) / casos_ultimo_periodo) * 100 if casos_ultimo_periodo > 0 else 0
     
-    incidencia = (previsao / 12000000) * 100000
-    risco_label, risco_class, risco_cor = calcular_risco(previsao, incidencia)
+    # O histórico não identifica um denominador populacional nem território de referência.
+    # Não calcular incidência agregada com população arbitrária.
+    incidencia = float('nan')
+    # Classificação demonstrativa por volume absoluto, sem validade epidemiológica municipal.
+    risco_label, risco_class, risco_cor = calcular_risco(previsao, 0)
     
     st.markdown("### Indicadores de Monitoramento")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Casos Previstos", f"{int(previsao)}", f"{variacao:+.1f}% vs obs.", delta_color="inverse")
-    m2.metric("Casos Observados (Histórico)", f"{int(casos_ultimo_periodo)}")
-    m3.metric("Incidência (por 100k hab)", f"{incidencia:.1f}")
-    m4.metric("Nível de Risco", risco_label)
+    m1.metric("Estimativa do modelo", f"{int(round(previsao))}", f"{variacao:+.1f}% vs média histórica", delta_color="inverse")
+    m2.metric("Média histórica da semana", f"{casos_ultimo_periodo:.0f}")
+    m3.metric("Incidência real", "N/D", help="Requer território e população compatíveis com os casos do DATASUS.")
+    m4.metric("Faixa demonstrativa", risco_label)
     m5.metric("Temperatura Referência", f"{temp_ref:.1f}°C")
     
-    st.markdown(f'<div class="alert-card {risco_class}"><strong>STATUS DO ALERTA:</strong> Risco {risco_label}. Ação sugerida: {gerar_recomendacoes(risco_label)[0].replace("•", "").strip()}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="alert-card {risco_class}"><strong>CLASSIFICAÇÃO EXPLORATÓRIA:</strong> Risco {risco_label}. Ação sugerida: {gerar_recomendacoes(risco_label)[0].replace("•", "").strip()}</div>', unsafe_allow_html=True)
     
     st.markdown("---")
     
     c_graf1, c_graf2 = st.columns([2, 1])
     
     with c_graf1:
-        st.markdown("#### Casos Reais vs. Previstos (Tendência)")
+        st.markdown("#### Médias históricas por semana do ano e ajuste do modelo")
         df_plot = df_historico.groupby('semana_epidem')['casos'].mean().reset_index()
-        df_plot['casos_previstos'] = modelo_rf.predict(df_historico.groupby('semana_epidem')[features_cols].mean())
+        df_plot['casos_previstos'] = np.maximum(0, modelo_rf.predict(df_historico.groupby('semana_epidem')[features_cols].mean()[features_cols]))
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=df_plot['semana_epidem'], y=df_plot['casos'], mode='lines', name='Casos Reais (Observados)', line=dict(color='#38BDF8', width=3)))
-        fig.add_trace(go.Scatter(x=df_plot['semana_epidem'], y=df_plot['casos_previstos'], mode='lines', name='Projeção do Modelo', line=dict(color='#F43F5E', width=3, dash='dash')))
+        fig.add_trace(go.Scatter(x=df_plot['semana_epidem'], y=df_plot['casos_previstos'], mode='lines', name='Ajuste do modelo (não é teste futuro)', line=dict(color='#F43F5E', width=3, dash='dash')))
         
-        std_dev = df_plot['casos_previstos'] * 0.15
-        fig.add_trace(go.Scatter(x=pd.concat([df_plot['semana_epidem'], df_plot['semana_epidem'][::-1]]),
-                                 y=pd.concat([df_plot['casos_previstos'] + std_dev, (df_plot['casos_previstos'] - std_dev)[::-1]]),
-                                 fill='toself', fillcolor='rgba(244, 63, 94, 0.08)', line=dict(color='rgba(255,255,255,0)'),
-                                 hoverinfo="skip", showlegend=True, name='Faixa de Incerteza (Ilustrativa)'))
-        
+        st.caption('Este gráfico compara médias de diferentes anos. Para avaliar generalização temporal, consulte o diagnóstico do modelo.')
+
         fig.add_vline(x=semana_sel, line_width=2, line_dash="dot", line_color="white", annotation_text="Semana Selecionada")
         fig.update_layout(height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', 
                           font=dict(color='#F8FAFC'), hovermode="x unified",
@@ -233,7 +258,8 @@ if menu == "1. Visão Geral Epidemiológica":
         st.plotly_chart(fig, use_container_width=True)
         
     with c_graf2:
-        st.markdown("#### Escala de Risco Epidemiológico")
+        st.markdown("#### Volume estimado — escala exploratória")
+        st.caption("Faixas em números absolutos apenas demonstrativas; não são limiares oficiais de alerta.")
         limite_max = max(1500, previsao * 1.25)
         
         fig_gauge = go.Figure(go.Indicator(
@@ -250,21 +276,21 @@ if menu == "1. Visão Geral Epidemiológica":
         fig_gauge.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#F8FAFC'), margin=dict(l=20, r=20, t=20, b=20))
         st.plotly_chart(fig_gauge, use_container_width=True)
         
-    st.markdown("### 📋 Plano de Ação Recomendado")
+    st.markdown("### 📋 Orientações demonstrativas (não prescritivas)")
     rec_list = gerar_recomendacoes(risco_label)
     for r in rec_list:
         st.write(r)
-    st.caption("*Nota: O DengueRadar é um sistema de apoio à decisão. Medidas operacionais devem ser validadas com a Vigilância Sanitária local.*")
+    st.caption("*Recomendações demonstrativas, não alertas oficiais. Ações de vigilância devem ser validadas pelas autoridades de Vigilância Epidemiológica.*")
 
     st.markdown("---")
     st.subheader("📥 Exportação de Dados")
     
     df_export = pd.DataFrame({
         "Semana Epidemiológica": [semana_sel],
-        "Casos Previstos": [int(previsao)],
-        "Casos Observados (Histórico)": [int(casos_ultimo_periodo)],
-        "Incidência (por 100k hab)": [round(incidencia, 1)],
-        "Nível de Risco Estimado": [risco_label],
+        "Estimativa retrospectiva do modelo": [int(round(previsao))],
+        "Média observada da semana ao longo dos anos": [round(casos_ultimo_periodo, 1)],
+        "Incidência (por 100k hab)": [None],
+        "Classificação Exploratória": [risco_label],
         "Temperatura Média (°C)": [round(temp_ref, 1)],
         "Precipitação (mm)": [round(chuva_ref, 1)]
     })
@@ -295,7 +321,7 @@ elif menu == "2. Inteligência Territorial (Radar)":
         cidade_sel = st.selectbox("Filtrar Município Específico", opcoes_cidades)
         
     with col2:
-        st.info(f"💡 **Inteligência Territorial:** Cada pontinho no mapa representa visualmente **1 caso estimado** distribuído heuristicamente em torno do centroide populacional do município.")
+        st.info(f"💡 **Inteligência Territorial:** Cada ponto é um **marcador fictício de distribuição ilustrativa** e NÃO corresponde a um caso ou foco verdadeiro. Exibimos no máximo 1.500 pontos por município.")
     
     st.markdown("---")
     c_mapa, c_rank = st.columns([2, 1.2])
@@ -314,12 +340,13 @@ elif menu == "2. Inteligência Territorial (Radar)":
         else:
             st.warning("Nenhum caso projetado para esta seleção.")
             
-        st.caption(f"Visualizando {len(df_pontinhos)} pontos de distribuição estimada. Aviso: Coordenadas dispersadas estatisticamente num raio aproximado de 4km do centro (heurística de visualização).")
+        st.caption(f"Visualizando {len(df_pontinhos)} marcadores sintéticos, limitados por município. Não são registros georreferenciados nem locais de transmissão.")
         
     with c_rank:
-        st.markdown("#### 🚨 Ranking de Intervenção")
+        st.markdown("#### Distribuição heurística de casos (não é ranking validado)")
         df_rank = df_espacial.copy()
-        df_rank['Nível de Risco'] = df_rank['Casos Previstos'].apply(lambda x: "CRÍTICO" if x > 400 else "ALTO" if x > 150 else "MODERADO")
+        df_rank['Nível de Risco'] = 'NÃO AVALIADO'
+        st.caption('Casos são distribuídos por pesos fixos escolhidos para demonstração. A incidência ilustrativa usa populações municipais aproximadas e NÃO permite priorização epidemiológica.')
         
         if cidade_sel != "Todos os Municípios":
             st.dataframe(df_rank[df_rank['Município/Região'] == cidade_sel][['Município/Região', 'Casos Previstos', 'Incidência (100k)', 'Nível de Risco']], 
@@ -374,7 +401,7 @@ elif menu == "3. Simulador e Cenários":
         st.markdown("</div>", unsafe_allow_html=True)
         
     st.markdown("---")
-    st.markdown("#### Impacto da Simulação")
+    st.markdown("#### Diferença estimada entre cenários hipotéticos")
     
     fig_comp = go.Figure(data=[
         go.Bar(name='Cenário A', x=['Casos Estimados'], y=[prev_a], marker_color='#38BDF8'),
@@ -383,7 +410,7 @@ elif menu == "3. Simulador e Cenários":
     fig_comp.update_layout(barmode='group', height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#F8FAFC'))
     st.plotly_chart(fig_comp, use_container_width=True)
     
-    st.info("⚠️ Mudanças climáticas extremas fora da distribuição dos dados de treinamento podem gerar previsões menos confiáveis (extrapolação matemática).")
+    st.info("⚠️ Este simulador compara respostas hipotéticas do modelo. Não demonstra causalidade nem estima surtos futuros com clima previsto. Mudanças fora da distribuição de treino podem ser pouco confiáveis.")
 
 
 # ==========================================
@@ -397,19 +424,29 @@ elif menu == "4. Diagnóstico do Modelo":
         st.warning("Modelo não carregado.")
         st.stop()
         
+    if meta_avaliacao is None or df_avaliacao is None:
+        st.warning('Avaliação temporal não encontrada. Execute o notebook 02 atualizado para gerar models/avaliacao_modelo.json e models/avaliacao_temporal.csv. Métricas de treinamento não substituem teste futuro.')
+    else:
+        mrf = meta_avaliacao.get('metricas_rf_teste', {})
+        mbase = meta_avaliacao.get('metricas_baseline_teste', {})
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric('Modelo', 'RandomForest')
+        col2.metric('Semanas de teste futuro', meta_avaliacao.get('registros_teste', 'N/D'))
+        col3.metric('MAE fora da amostra', f"{mrf.get('MAE', 0):.1f} casos")
+        col4.metric('RMSE fora da amostra', f"{mrf.get('RMSE', 0):.1f} casos")
+        st.caption(f"Baseline sazonal: MAE {mbase.get('MAE', float('nan')):.1f} | RMSE {mbase.get('RMSE', float('nan')):.1f}. Avaliação cronológica, não erro in-sample.")
+        fig_test = go.Figure()
+        x_test = [f"{int(a)}-S{int(b):02d}" for a,b in zip(df_avaliacao.ano, df_avaliacao.semana_epidem)]
+        fig_test.add_trace(go.Scatter(x=x_test, y=df_avaliacao.casos, mode='lines+markers', name='Observado', line=dict(color='#38BDF8')))
+        fig_test.add_trace(go.Scatter(x=x_test, y=df_avaliacao.previsto_rf, mode='lines+markers', name='Previsto no teste futuro', line=dict(color='#F43F5E')))
+        fig_test.update_layout(title='Teste cronológico: observado vs previsto', height=330, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#F8FAFC'))
+        st.plotly_chart(fig_test, use_container_width=True)
+
     X = df_historico[features_cols]
     y_true = df_historico['casos']
     y_pred = modelo_rf.predict(X)
-    
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Modelo Base", "RandomForest", "Scikit-Learn")
-    col2.metric("Registros Avaliados", len(df_historico))
-    col3.metric("MAE (In-Sample)", f"{mae:.1f} casos")
-    col4.metric("RMSE (In-Sample)", f"{rmse:.1f}")
-    
+    st.caption('Os gráficos abaixo usam o histórico completo com o modelo refitado: diagnóstico exploratório in-sample, NÃO é prova de desempenho futuro.')
+
     st.markdown("---")
     c1, c2 = st.columns(2)
     
@@ -421,7 +458,7 @@ elif menu == "4. Diagnóstico do Modelo":
         fig_imp = px.bar(df_imp, x='Importância', y='Variável', orientation='h', color_discrete_sequence=['#38BDF8'])
         fig_imp.update_layout(height=350, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#F8FAFC'))
         st.plotly_chart(fig_imp, use_container_width=True)
-        st.caption("O gráfico indica quais fatores climáticos e temporais exercem maior peso matemático na decisão de projeção de casos da IA.")
+        st.caption("Importância por impureza do Random Forest. Não implica causalidade nem representa, necessariamente, a influência de cada variável em previsões futuras.")
         
     with c2:
         st.markdown("#### Análise de Resíduos (Erro de Predição)")
@@ -452,13 +489,13 @@ elif menu == "5. Dados e Metodologia":
 
     ### 🧠 Modelagem e Inteligência Artificial
     O motor preditivo atual baseia-se num algoritmo **Random Forest Regressor** (Scikit-Learn).
-    * **Justificativa:** O modelo consegue mapear interações não-lineares, essenciais para compreender como limiares combinados de chuva e calor desencadeiam ciclos de proliferação do mosquito.
-    * **Validação:** As métricas de avaliação avaliam o ajuste atual, servindo como base para futuras implementações de validação temporal estrita (*walk-forward*).
+    * **Justificativa:** O modelo capta relações não lineares entre as variáveis disponíveis, sem demonstrar relações causais.
+    * **Validação:** A versão revisada usa holdout temporal (últimas semanas) para testar o modelo fora da amostra, comparando-o com uma referência sazonal. Consulte a aba Diagnóstico e os artefatos de avaliação.
 
     ### ⚠️ Confiabilidade e Limitações
     A transparência é um pilar do DengueRadar. É fundamental compreender as ressalvas da plataforma:
     1. **Atraso de Notificação:** Os dados observados sofrem atrasos institucionais. O modelo trata dados históricos como consolidados, o que pode não refletir a realidade em tempo real.
-    2. **Distribuição Espacial Heurística:** A aba "Inteligência Territorial" distribui as previsões globais utilizando ponderação populacional com base em dados reais do IBGE/SEADE. Os pontos representam áreas de **vulnerabilidade teórica estimada**, e não localizações exatas de pacientes.
+    2. **Distribuição Espacial Heurística:** A aba "Inteligência Territorial" distribui um total inserido pelo usuário usando pesos heurísticos fixos; as populações fornecidas são valores de referência aproximados e devem ser verificadas em fonte oficial. Os pontos representam áreas de **vulnerabilidade teórica estimada**, e não localizações exatas de pacientes.
     3. **Extrapolação Climática:** Simulações com parâmetros climáticos muito além do histórico de treinamento podem gerar previsões estatisticamente não confiáveis.
     4. **Sistema de Apoio:** A IA não toma decisões clínicas. As projeções apoiam o planejamento, mas as ações devem seguir os protocolos oficiais da Vigilância em Saúde.
 """)
