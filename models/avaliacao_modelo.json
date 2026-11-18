@@ -1,0 +1,81 @@
+{
+  "modelo": "RandomForestRegressor",
+  "modelo_comparativo": "DecisionTreeRegressor",
+  "validacao": "treino 60%, validacao 20%, teste 20% em blocos cronologicos",
+  "features": [
+    "semana_epidem",
+    "temp_media",
+    "precipitacao_total"
+  ],
+  "alvo": "casos",
+  "registros_totais": 51,
+  "registros_treino": 29,
+  "registros_validacao": 11,
+  "registros_teste": 11,
+  "treino_periodo": "2025/SE02 a 2025/SE30",
+  "validacao_periodo": "2025/SE31 a 2025/SE41",
+  "teste_periodo": "2025/SE42 a 2025/SE52",
+  "teste_inicio": {
+    "ano": 2025,
+    "semana": 42
+  },
+  "teste_fim": {
+    "ano": 2025,
+    "semana": 52
+  },
+  "metricas_validacao": {
+    "Árvore de Decisão": {
+      "MAE": 44.12121212121211,
+      "RMSE": 47.0450031696494,
+      "R²": -0.7491222493639109,
+      "WAPE (%)": 14.071711607229146
+    },
+    "Random Forest": {
+      "MAE": 433.07618961038946,
+      "RMSE": 486.84961717150514,
+      "R²": -186.3194291441549,
+      "WAPE (%)": 138.12229880296562
+    },
+    "Baseline sazonal": {
+      "MAE": 1420.4545454545455,
+      "RMSE": 1420.8998749192199,
+      "R²": -1594.5856138884174,
+      "WAPE (%)": 453.029863728617
+    }
+  },
+  "metricas_teste": {
+    "Random Forest": {
+      "MAE": 60.93575440115443,
+      "RMSE": 71.6435742719249,
+      "R²": -1.2854425386173882,
+      "WAPE (%)": 18.614087709322376
+    },
+    "Árvore de Decisão": {
+      "MAE": 44.77272727272727,
+      "RMSE": 52.974050251042726,
+      "R²": -0.2495170193192271,
+      "WAPE (%)": 13.67675645653985
+    },
+    "Baseline sazonal": {
+      "MAE": 535.1363636363636,
+      "RMSE": 537.230672481147,
+      "R²": -127.51014627414904,
+      "WAPE (%)": 163.46848097750626
+    }
+  },
+  "metricas_rf_teste": {
+    "MAE": 60.936,
+    "RMSE": 71.644,
+    "R²": -1.285,
+    "WAPE (%)": 18.614
+  },
+  "metricas_baseline_teste": {
+    "MAE": 535.136,
+    "RMSE": 537.231,
+    "R²": -127.51,
+    "WAPE (%)": 163.468
+  },
+  "modelo_escolhido_na_validacao_por_mae": "Árvore de Decisão",
+  "menor_mae_no_teste": "Árvore de Decisão",
+  "observacao": "Métricas do bloco de teste cronológico antes do ajuste final. Clima da própria semana: estudo retrospectivo / cenário condicional, não previsão operacional comprovada."
+}
